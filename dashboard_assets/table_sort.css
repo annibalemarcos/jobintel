@@ -1,0 +1,4 @@
+.table-sort-button{appearance:none;border:0;background:transparent;padding:0;color:inherit;font:inherit;font-size:inherit;font-weight:inherit;text-align:left;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.table-sort-button:hover{color:var(--green)}
+.table-sort-button:focus-visible{outline:2px solid var(--green);outline-offset:4px;border-radius:2px}
+.table-sort-button span{color:var(--green);font-size:12px;line-height:1}

@@ -239,6 +239,7 @@ class Handler(BaseHTTPRequestHandler):
                  '/logic.js': ('logic.js', 'text/javascript'), '/tracking.js': ('tracking.js', 'text/javascript'),
                  '/tracking.css': ('tracking.css', 'text/css'), '/style.css': ('style.css', 'text/css')}
         files['/profile.css']=('profile.css','text/css')
+        files['/table_sort.css']=('table_sort.css','text/css')
         files['/profile_io.js']=('profile_io.js','text/javascript')
         files['/profile_analysis_export.js']=('profile_analysis_export.js','text/javascript')
         files['/application_materials_io.js']=('application_materials_io.js','text/javascript')

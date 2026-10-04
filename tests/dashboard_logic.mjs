@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const source = readFileSync(new URL('../dashboard_assets/logic.js', import.meta.url), 'utf8');
-const {query, makeCsv, reviewQueueGroup} = await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
-const defaults = {runs:[],search:'',status:'',type:'',domain:'',from:'',to:'',alive:'',ai:'',hasEmails:'',hasJobs:'',hasCareers:'',hasError:'',email:'',job:'',url:'',minPages:'',maxPages:'',minJobs:'',maxJobs:'',minEmails:'',maxEmails:'',sort:'newest',preMatchStatus:'',qualityStatus:'',eligibilityStatus:'',recommendationStatus:'',userDecisionStatus:'',reviewQueueStatus:'',dedup:true,keep:'latest'};
+const {query, makeCsv, reviewQueueGroup, desiredRoleMatches, coldEmailCategory, coldEmailFilterMatches, bestContactEmail} = await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const defaults = {runs:[],search:'',status:'',type:'',domain:'',from:'',to:'',alive:'',ai:'',hasEmails:'',hasJobs:'',hasCareers:'',hasError:'',email:'',job:'',url:'',minPages:'',maxPages:'',minJobs:'',maxJobs:'',minEmails:'',maxEmails:'',sort:'newest',preMatchStatus:'',qualityStatus:'',eligibilityStatus:'',recommendationStatus:'',userDecisionStatus:'',reviewQueueStatus:'',desiredRoleStatus:'',coldEmailStatus:'',dedup:true,keep:'latest'};
 const record=(date,run,extra={})=>({id:run+'#0',run_id:run,date,domain:'aave.com',name:'Aave',type:'DeFi',status:'OK',alive:true,ai:false,model:'luna',version:'2.1.4',input_file:'domains.csv',canonical:'https://aave.com',description:'',error:'',pages:45,emails:['contact@aave.com','hr@aave.com'],careers:['https://aave.com/careers'],evidence:[],jobs:[{url:'https://aave.com/jobs/1',title:'Engineer'},{url:'https://aave.com/jobs/2',title:'Designer'}],...extra});
 const records=[record('2026-10-01T12:00:00','old'),record('2026-10-03T12:00:00','new')];
 let result=query(records,defaults,'companies');
@@ -37,6 +37,39 @@ assert.equal(query(tracked,{...defaults,milestone:'interview'},'applications').r
 assert.equal(query(tracked,{...defaults,scoreStatus:'scored',minScore:'80'},'jobs').rows.length,1);
 assert.equal(query(tracked,{...defaults,scoreStatus:'unscored'},'jobs').rows.length,1);
 assert.equal(query(tracked,{...defaults,sort:'score_desc'},'jobs').rows[0].item.score.total,82);
+const sortRecord=record('2026-10-03T12:00:00','sortable',{jobs:[
+  {url:'https://aave.com/jobs/score-9',title:'Role 9',score:{total:9},application:{applied_at:'2026-10-03T09:30:00Z',follow_up_at:'2026-10-08T12:00:00Z'}},
+  {url:'https://aave.com/jobs/score-100',title:'Role 100',score:{total:100},application:{applied_at:'2026-10-01T12:00:00Z',follow_up_at:'2026-10-05T12:00:00Z'}},
+  {url:'https://aave.com/jobs/score-80',title:'Role 80',score:{total:80},application:{applied_at:'02/10/2026 23:59',follow_up_at:'2026-10-06T12:00:00Z'}},
+  {url:'https://aave.com/jobs/score-missing',title:'Role missing',score:{total:null},application:{}},
+  {url:'https://aave.com/jobs/score-0',title:'Role zero',score:{total:0},application:{applied_at:'',follow_up_at:null}}
+]});
+const sortTitles=(sort,filters={})=>query([sortRecord],{...defaults,...filters,sort},'jobs').rows.map(row=>row.item.title);
+assert.deepEqual(sortTitles('score_desc'),['Role 100','Role 80','Role 9','Role zero','Role missing'],
+  'profile scores sort numerically descending, keeping unknown scores last');
+assert.deepEqual(sortTitles('score_asc'),['Role zero','Role 9','Role 80','Role 100','Role missing'],
+  'profile scores sort numerically ascending, keeping unknown scores last');
+assert.deepEqual(sortTitles('applied_newest'),['Role 9','Role 80','Role 100','Role missing','Role zero'],
+  'application dates sort by timestamp descending and missing dates remain last');
+assert.deepEqual(sortTitles('applied_oldest'),['Role 100','Role 80','Role 9','Role missing','Role zero'],
+  'application dates sort by timestamp ascending and DD/MM/YYYY dates are parsed as day/month');
+assert.deepEqual(sortTitles('followup'),['Role 100','Role 80','Role 9','Role missing','Role zero'],
+  'nearest follow-up sorts first and missing dates remain last');
+assert.deepEqual(sortTitles('followup_desc'),['Role 9','Role 80','Role 100','Role missing','Role zero'],
+  'farthest follow-up sorts first and missing dates remain last');
+const executionRows=[
+  record('2026-10-01T12:00:00Z','run-old',{jobs:[{url:'https://aave.com/jobs/run-old',title:'Run old'}]}),
+  record('2026-10-03T12:00:00Z','run-new',{jobs:[{url:'https://aave.com/jobs/run-new',title:'Run new'}]}),
+  record('','run-missing',{jobs:[{url:'https://aave.com/jobs/run-missing',title:'Run missing'}]})
+];
+assert.deepEqual(query(executionRows,{...defaults,sort:'execution_newest'},'jobs').rows.map(row=>row.item.title),
+  ['Run new','Run old','Run missing'],'execution dates sort by real timestamp with missing last');
+assert.deepEqual(query(executionRows,{...defaults,sort:'execution_oldest'},'jobs').rows.map(row=>row.item.title),
+  ['Run old','Run new','Run missing']);
+assert.deepEqual(sortTitles('score_desc',{search:'role',scoreStatus:'scored'}).slice(0,2),['Role 100','Role 80'],
+  'sorting follows active search and filters before callers paginate the result');
+assert.deepEqual(sortTitles('score_desc').slice(0,2),['Role 100','Role 80'],
+  'the first page slice is taken from the fully sorted result');
 assert.equal(query(tracked,{...defaults,hasResponse:'no'},'applications').rows.length,1);
 assert.equal(query(tracked,{...defaults,appliedTo:'2026-10-02'},'applications').rows.length,1);
 assert.equal(query(tracked,{...defaults,followUp:'2026-10-05'},'applications').rows.length,1);
@@ -121,6 +154,97 @@ const reviewSorting=record('2026-10-01','review-sort',{jobs:[
 assert.deepEqual(query([reviewSorting],{...defaults,sort:'review_queue',dedup:false},'jobs').rows.map(row=>row.item.title),
   ['First new','First old','Later','Insufficient','Other'],
   'queue sorting groups first/later/insufficient before non-review and orders each group by publication date');
+const desiredCustomer=['Customer Operations'];
+for(const title of ['Customer Operations','Customer Operations Manager','Senior Customer Operations Manager','Customer Operations Lead','Customer Ops Manager'])
+  assert.equal(desiredRoleMatches(title,desiredCustomer),true,`${title} should match Customer Operations`);
+for(const title of ['Solutions Engineer','Software Engineer','Enterprise Account Executive','Enterprise Partnerships Lead (Financial Markets)','Financial Analyst'])
+  assert.equal(desiredRoleMatches(title,desiredCustomer),false,`${title} should not match Customer Operations`);
+assert.equal(desiredRoleMatches('Solutions Engineer',['Solutions Engineer']),true,
+  'a role explicitly added to desired_roles can match normally');
+assert.equal(desiredRoleMatches('Enterprise Partnerships Lead (Financial Markets)',['Enterprise Partnerships']),true,
+  'a desired role family explicitly added by the user can match');
+for(const title of ['Product Operations Manager','Senior Product Operations Specialist','Product Ops Lead'])
+  assert.equal(desiredRoleMatches(title,['Product Operations']),true);
+for(const title of ['Product Manager','Product Designer','Product Engineer','Solutions Engineer'])
+  assert.equal(desiredRoleMatches(title,['Product Operations']),false);
+for(const title of ['P2P Dispute Moderator','P2P Dispute Specialist','P2P Dispute Resolution Specialist','P2P Moderator'])
+  assert.equal(desiredRoleMatches(title,['P2P Dispute Resolution']),true);
+for(const title of ['P2P Backend Engineer','Crypto Trader','Partnerships Manager'])
+  assert.equal(desiredRoleMatches(title,['P2P Dispute Moderator']),false);
+for(const title of ['Community Moderator','Community Moderation Specialist','Senior Community Moderator'])
+  assert.equal(desiredRoleMatches(title,['Community Moderator']),true);
+for(const title of ['Community Engineer','Developer Relations Engineer'])
+  assert.equal(desiredRoleMatches(title,['Community Moderator']),false);
+assert.equal(desiredRoleMatches('Customer Operations Manager',[]),false,'empty profile roles cannot invent a match');
+const desiredRoleRecords=[record('2026-10-01','desired-old',{jobs:[
+  {url:'https://aave.com/jobs/customer-ops',title:'Customer Operations Manager',description:'Solutions Engineer and many other words.'},
+  {url:'https://aave.com/jobs/solutions',title:'Solutions Engineer',description:'Customer operations, support, Web3, SaaS, LATAM.'},
+  {url:'https://aave.com/jobs/partnerships',title:'Enterprise Partnerships Lead (Financial Markets)'}
+]}),record('2026-10-03','desired-current',{jobs:[
+  {url:'https://aave.com/jobs/customer-ops',title:'Customer Ops Manager'},
+  {url:'https://aave.com/jobs/product-ops',title:'Product Ops Lead'}
+]})];
+const compatibleJobs=query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible'},'jobs',desiredCustomer).rows;
+assert.deepEqual(compatibleJobs.map(row=>row.item.title),['Customer Ops Manager'],
+  'desired role filter uses the deduplicated current occurrence and title, not matching words in description');
+assert.deepEqual(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'incompatible'},'jobs',desiredCustomer).rows.map(row=>row.item.title),
+  ['Product Ops Lead','Solutions Engineer','Enterprise Partnerships Lead (Financial Markets)']);
+assert.equal(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible',search:'customer'},'jobs',desiredCustomer).rows.length,1,
+  'desired role composes with search');
+assert.equal(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible',domain:'aave.com'},'jobs',desiredCustomer).rows.length,1,
+  'desired role composes with existing filters');
+assert.deepEqual(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible',sort:'oldest'},'jobs',desiredCustomer).rows.map(row=>row.item.title),['Customer Ops Manager']);
+const pagedDesired=query([record('2026-10-03','desired-page',{jobs:[
+  {url:'https://aave.com/jobs/1',title:'Customer Operations Manager'},
+  {url:'https://aave.com/jobs/2',title:'Senior Customer Operations Lead'},
+  {url:'https://aave.com/jobs/3',title:'Customer Operations Specialist'}
+]})],{...defaults,desiredRoleStatus:'compatible',sort:'newest'},'jobs',desiredCustomer).rows;
+assert.equal(pagedDesired.slice(0,2).length,2,'matching/sort occur before pagination slicing');
+assert.equal(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible'},'jobs',[]).rows.length,0);
+assert.equal(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'incompatible'},'jobs',[]).rows.length,0,
+  'without desired roles both explicit classifications remain unavailable');
+assert.equal(query(desiredRoleRecords,{...defaults,desiredRoleStatus:'compatible'},'companies',[]).rows.length,1,
+  'the jobs-only filter does not affect other tabs');
+const coldCompany=(domain,extra={})=>({...record('2026-10-03',domain,{jobs:[],careers:[],emails:['contact@company.test'],pages:3,alive:true,status:'OK',error:''}),domain,name:domain,...extra});
+const coldRecords=[
+  coldCompany('jobs.test',{emails:['jobs@company.test','contact@company.test']}),
+  coldCompany('hello.test',{emails:['hello@company.test']}),
+  coldCompany('careerless.test',{emails:['careers@company.test','info@company.test']}),
+  coldCompany('careers-page.test',{careers:['https://careers-page.test/careers']}),
+  coldCompany('with-jobs.test',{jobs:[{url:'https://with-jobs.test/jobs/1',title:'Role'}]}),
+  coldCompany('no-email.test',{emails:[]}),
+  coldCompany('failed.test',{status:'NO_RESPONSE',alive:false,pages:0}),
+  coldCompany('unknown.test',{status:'UNKNOWN',alive:false,pages:0}),
+  coldCompany('generic-pages.test',{evidence:['https://generic-pages.test/about','https://generic-pages.test/contact']})
+];
+assert.equal(coldEmailCategory(coldRecords[0]),'opportunity','successful processed company with email and no career/job signal qualifies');
+assert.equal(coldEmailCategory(coldRecords[1]),'opportunity');
+assert.equal(coldEmailCategory(coldRecords[2]),'opportunity');
+assert.equal(coldEmailCategory(coldRecords[3]),'careers');
+assert.equal(coldEmailCategory(coldRecords[4]),'careers');
+assert.equal(coldEmailCategory(coldRecords[5]),'no_email');
+assert.equal(coldEmailCategory(coldRecords[6]),'unknown','failed site is not treated as confirmed absence');
+assert.equal(coldEmailCategory(coldRecords[7]),'unknown');
+assert.equal(coldEmailCategory(coldRecords[8]),'opportunity','generic about/contact pages are not Careers pages');
+assert.equal(bestContactEmail(['other@company.test','info@company.test','contact@company.test','jobs@company.test']),'jobs@company.test');
+assert.equal(bestContactEmail(['other@company.test','hello@company.test','info@company.test']),'hello@company.test');
+assert.equal(bestContactEmail(['other@company.test','malformed-address']),'other@company.test');
+assert.equal(coldEmailFilterMatches(coldRecords[3],'careers'),true,'career page counts even when no email was found');
+const coldQuery=(filters={},records=coldRecords)=>query(records,{...defaults,...filters},'companies').rows;
+assert.deepEqual(coldQuery({coldEmailStatus:'opportunity'}).map(row=>row.domain),
+  ['jobs.test','hello.test','generic-pages.test','careerless.test']);
+assert.deepEqual(coldQuery({coldEmailStatus:'careers'}).map(row=>row.domain),['with-jobs.test','careers-page.test']);
+assert.deepEqual(coldQuery({coldEmailStatus:'no_email'}).map(row=>row.domain),['no-email.test']);
+assert.deepEqual(coldQuery({coldEmailStatus:'opportunity',search:'hello'}).map(row=>row.domain),['hello.test'],
+  'cold email filter composes with search');
+assert.deepEqual(coldQuery({coldEmailStatus:'opportunity',status:'OK'}).map(row=>row.domain),
+  ['jobs.test','hello.test','generic-pages.test','careerless.test'],'cold email filter composes with status');
+assert.deepEqual(coldQuery({coldEmailStatus:'opportunity',sort:'name'}).map(row=>row.domain),
+  ['careerless.test','generic-pages.test','hello.test','jobs.test'],'existing sort applies to filtered companies');
+assert.equal(coldQuery({coldEmailStatus:'opportunity'}).slice(0,2).length,2,'filter applies before page slicing');
+const changingColdFilter={page:4,change(value){this.value=value;this.page=1;}};
+changingColdFilter.change('opportunity');
+assert.equal(changingColdFilter.page,1,'changing the filter returns to the first page');
 const csv=makeCsv(['Title'],[['=1+1'],['a,"b"\nnew line']]);
 assert.ok(csv.startsWith('\ufeff'));assert.ok(csv.includes("'=1+1"));assert.ok(csv.includes('"a,""b""\nnew line"'));
 console.log('Dashboard query regression tests passed.');

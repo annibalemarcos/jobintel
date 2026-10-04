@@ -79,3 +79,7 @@ desktop.ini
 .vscode/
 *.code-workspace
 .history/
+
+# Personal profile exports
+perfil-*.json
+profile-*.json

@@ -26,10 +26,45 @@ class DashboardDataTests(unittest.TestCase):
         markup=(Path(dashboard.__file__).resolve().parent/'dashboard_assets'/'index.html').read_text(encoding='utf-8')
         for control_id in ('preMatchStatus','qualityStatus','eligibilityStatus','recommendationStatus',
                            'userDecisionStatus','applicationStatus','priority','scoreStatus','hasResponse',
-                           'reviewQueueStatus','sort','dedup','keep','auto','advanced','advanced-toggle'):
+                           'reviewQueueStatus','desiredRoleStatus','sort','dedup','keep','auto','advanced','advanced-toggle'):
             with self.subTest(control_id=control_id):
                 self.assertEqual(markup.count(f'id="{control_id}"'),1)
         self.assertEqual(markup.count('id="review-queue-filter"'),1)
+
+    def test_desired_role_filter_is_declared_for_jobs_and_uses_existing_profile_api(self):
+        root=Path(dashboard.__file__).resolve().parent/'dashboard_assets'
+        markup=(root/'index.html').read_text(encoding='utf-8')
+        source=(root/'app.js').read_text(encoding='utf-8')
+        self.assertEqual(markup.count('id="desired-role-filter"'),1)
+        self.assertIn('<option value="compatible">Compatível</option>',markup)
+        self.assertIn('<option value="incompatible">Não compatível</option>',markup)
+        self.assertIn("$('desired-role-filter').hidden=tab!=='jobs'",source)
+        self.assertIn("fetch('/api/profile'",source)
+        self.assertIn('setDesiredRoles(value.profile?.desired_roles)',source)
+
+    def test_cold_email_filter_is_companies_only_dynamic_and_reuses_contacts_cell(self):
+        root=Path(dashboard.__file__).resolve().parent/'dashboard_assets'
+        markup=(root/'index.html').read_text(encoding='utf-8')
+        source=(root/'app.js').read_text(encoding='utf-8')
+        self.assertEqual(markup.count('id="coldEmailStatus"'),1)
+        self.assertEqual(markup.count('id="cold-email-filter"'),1)
+        for value,label in (('opportunity','Oportunidade de cold email'),('careers','Com página de carreiras/vagas'),('no_email','Sem e-mail')):
+            self.assertIn(f'<option value="{value}">{label}</option>',markup)
+        self.assertIn("$('cold-email-filter').hidden=tab!=='companies'",source)
+        self.assertIn('updateColdEmailCounts(f)',source)
+        self.assertIn('bestContactEmail(r.emails)',source)
+        self.assertIn("page=1;render();",source)
+
+    def test_jobs_table_sortable_columns_keep_tracking_action_third(self):
+        root=Path(dashboard.__file__).resolve().parent
+        source=(root/'dashboard_assets'/'app.js').read_text(encoding='utf-8')
+        columns="['Vaga / candidatura','Empresa','Acompanhar','Score de perfil','Recomendação','Minha decisão','Status da candidatura','Pré-match','Qualidade da descrição','Elegibilidade IA','Prioridade','Apliquei em','Próximo retorno','Execução']"
+        self.assertIn(f"tab === 'jobs' ? {columns}",source)
+        self.assertIn('company(r),...(tab===\'jobs\'?[`<button class="detail-button" data-detail="${i}">Acompanhar →</button>`',source)
+        self.assertIn("jobTab ? openApplication(rows[Number(b.dataset.detail)])",source)
+        self.assertIn('aria-sort="${direction}"',source)
+        self.assertIn("$('thead').querySelectorAll('[data-sort-first]')",source)
+        self.assertTrue((root/'dashboard_assets'/'table_sort.css').is_file())
 
     def test_current_public_branding_uses_jobintel(self):
         markup=(Path(dashboard.__file__).resolve().parent/'dashboard_assets'/'index.html').read_text(encoding='utf-8')

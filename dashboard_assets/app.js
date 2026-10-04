@@ -1,4 +1,4 @@
-import {query, norm, identity, makeCsv, reviewQueueGroup} from './logic.js';
+import {query, norm, identity, makeCsv, reviewQueueGroup, coldEmailFilterMatches, bestContactEmail, validCompanyEmails} from './logic.js';
 import {initTracking, renderApplicationOverview, openApplication, applicationBadge, scoreBadge, statuses} from './tracking.js';
 import {exportProfileJson, importProfileJson} from './profile_io.js';
 import {analysisText, safeFilename} from './profile_analysis_export.js';
@@ -9,12 +9,13 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const count = value => Number(value).toLocaleString('pt-BR');
 const labels = {overview:'Visão geral', companies:'Empresas', jobs:'Vagas', applications:'Candidaturas', emails:'Contatos', careers:'Carreiras', runs:'Execuções', profile:'Perfil'};
 const tableTitles = {overview:'Empresas coletadas', companies:'Empresas coletadas', jobs:'Vagas e candidaturas encontradas', applications:'Meu acompanhamento de vagas', emails:'E-mails encontrados', careers:'Páginas de carreira', runs:'Histórico de execuções'};
-const fields = ['search','status','type','sort','domain','from','to','alive','ai','hasEmails','hasJobs','hasCareers','hasError','email','job','url','minPages','maxPages','minJobs','maxJobs','minEmails','maxEmails','model','version','input_file','keep','applicationStatus','priority','scoreStatus','preMatchStatus','qualityStatus','eligibilityStatus','recommendationStatus','userDecisionStatus','reviewQueueStatus','hasResponse','minScore','maxScore','appliedFrom','appliedTo','followUp','rejectionStage','milestone'];
+const fields = ['search','status','type','sort','domain','from','to','alive','ai','hasEmails','hasJobs','hasCareers','hasError','email','job','url','minPages','maxPages','minJobs','maxJobs','minEmails','maxEmails','model','version','input_file','keep','applicationStatus','priority','scoreStatus','preMatchStatus','qualityStatus','eligibilityStatus','recommendationStatus','userDecisionStatus','reviewQueueStatus','desiredRoleStatus','coldEmailStatus','hasResponse','minScore','maxScore','appliedFrom','appliedTo','followUp','rejectionStage','milestone'];
 const filterLabels = {search:'Busca',status:'Status',type:'Categoria',domain:'Empresa',from:'De',to:'Até',alive:'Acesso',ai:'IA',hasEmails:'E-mails',hasJobs:'Vagas',hasCareers:'Carreiras',hasError:'Erros',email:'E-mail contém',job:'Cargo contém',url:'URL contém',minPages:'Mín. páginas',maxPages:'Máx. páginas',minJobs:'Mín. vagas',maxJobs:'Máx. vagas',minEmails:'Mín. e-mails',maxEmails:'Máx. e-mails',model:'Modelo',version:'Versão',input_file:'Arquivo de entrada'};
-Object.assign(filterLabels,{applicationStatus:'Candidatura',priority:'Prioridade',scoreStatus:'Score',preMatchStatus:'Pré-match',qualityStatus:'Qualidade da descrição',eligibilityStatus:'Elegibilidade IA',recommendationStatus:'Recomendação',userDecisionStatus:'Minha decisão',reviewQueueStatus:'Fila de revisão',hasResponse:'Resposta',minScore:'Score mín.',maxScore:'Score máx.',appliedFrom:'Apliquei de',appliedTo:'Apliquei até',followUp:'Retorno até',rejectionStage:'Rejeição',milestone:'Etapa alcançada'});
+Object.assign(filterLabels,{applicationStatus:'Candidatura',priority:'Prioridade',scoreStatus:'Score',preMatchStatus:'Pré-match',qualityStatus:'Qualidade da descrição',eligibilityStatus:'Elegibilidade IA',recommendationStatus:'Recomendação',userDecisionStatus:'Minha decisão',reviewQueueStatus:'Fila de revisão',desiredRoleStatus:'Cargo desejado',coldEmailStatus:'Cold email',hasResponse:'Resposta',minScore:'Score mín.',maxScore:'Score máx.',appliedFrom:'Apliquei de',appliedTo:'Apliquei até',followUp:'Retorno até',rejectionStage:'Rejeição',milestone:'Etapa alcançada'});
 let data = {records:[],runs:[],warnings:[]}, tab = 'overview', page = 1, current = [], queryResult = null, busy = false, firstLoad = true;
 let loadedSuccessfully = false;
 let profileState = null;
+let desiredRoles = [];
 let visibleProfileAnalysis = null;
 let materialsState = null;
 
@@ -79,6 +80,19 @@ function updateOptions() {
     if (options.includes(value)) $(key).value = value;
   }
 }
+function updateColdEmailCounts(f) {
+  const companies=query(data.records,{...f,coldEmailStatus:''},'companies').rows;
+  const counts={
+    '':companies.length,
+    opportunity:companies.filter(row=>coldEmailFilterMatches(row,'opportunity')).length,
+    careers:companies.filter(row=>coldEmailFilterMatches(row,'careers')).length,
+    no_email:companies.filter(row=>coldEmailFilterMatches(row,'no_email')).length,
+  };
+  const labels={'':'Todos',opportunity:'Oportunidade de cold email',careers:'Com página de carreiras/vagas',no_email:'Sem e-mail'};
+  const select=$('coldEmailStatus'),selected=select.value;
+  for(const option of select.options)option.textContent=`${labels[option.value]} (${count(counts[option.value]||0)})`;
+  select.value=selected;
+}
 async function load(manual = false) {
   if (busy) return;
   busy = true; $('refresh').disabled = true; $('refresh').textContent = 'Atualizando…';
@@ -119,8 +133,11 @@ function render() {
   $('application-recommendation-filter').hidden=tab!=='jobs';
   $('user-decision-filter').hidden=tab!=='jobs';
   $('review-queue-filter').hidden=tab!=='jobs';
+  $('desired-role-filter').hidden=tab!=='jobs';
+  $('cold-email-filter').hidden=tab!=='companies';
   if(tab==='profile') { persist(); return; }
-  queryResult = query(data.records, f, tab);
+  if(tab==='companies')updateColdEmailCounts(f);
+  queryResult = query(data.records, f, tab, desiredRoles);
   $('dedup-help').textContent = tab === 'emails' ? 'Uma ocorrência por e-mail, entre empresas e execuções.' : ['jobs','applications'].includes(tab) ? 'Uma ocorrência por URL de vaga. O acompanhamento é compartilhado entre execuções.' : tab === 'careers' ? 'Uma ocorrência por URL de carreira.' : tab === 'runs' ? 'Execuções são únicas; esta opção não se aplica aqui.' : 'Uma ocorrência por domínio, entre execuções.';
   $('dedup').disabled = tab === 'runs'; $('keep').disabled = !f.dedup || tab === 'runs';
   const active = activeFilters(f);
@@ -152,6 +169,11 @@ function render() {
     : `${count(current.length)} resultados · ${count(queryResult.hidden)} repetidos ocultos · ${count(new Set(queryResult.rows.map(r=>r.run_id)).size)} execuções`;
   renderTable(visible);
   $('empty').hidden = current.length > 0;
+  const noDesiredRoles=tab==='jobs'&&f.desiredRoleStatus&&!desiredRoles.length;
+  $('empty').querySelector('h3').textContent=noDesiredRoles?'Nenhum cargo desejado cadastrado':'Nenhum resultado encontrado';
+  $('empty').querySelector('p').textContent=noDesiredRoles
+    ?'Cadastre Cargos desejados no Perfil para usar este filtro.'
+    : 'Ajuste a busca ou limpe os filtros para explorar a coleta.';
   $('page-info').textContent = current.length ? `${start+1}–${Math.min(start+size,current.length)} de ${count(current.length)}` : '0 resultados';
   $('page-number').textContent = `${page} / ${maxPage}`;
   $('prev').disabled = page === 1; $('next').disabled = page >= maxPage;
@@ -175,26 +197,47 @@ function renderCharts(rows) {
   $('charts').innerHTML = chart('Acessibilidade dos sites','Distribuição das observações filtradas',[...access]) + chart('Origem dos resultados','Observações por execução · até 5 execuções',[...runs].sort((a,b)=>b[1]-a[1]).slice(0,5));
   $('charts').querySelectorAll('.bar').forEach(bar => bar.style.width = `${100*Number(bar.dataset.value)/Number(bar.dataset.max)}%`);
 }
+const jobSortableHeaders={
+  'Score de perfil':{first:'score_desc',second:'score_asc',firstDirection:'descending'},
+  'Apliquei em':{first:'applied_newest',second:'applied_oldest',firstDirection:'descending'},
+  'Próximo retorno':{first:'followup',second:'followup_desc',firstDirection:'ascending'},
+  'Execução':{first:'execution_newest',second:'execution_oldest',firstDirection:'descending'},
+};
+function tableHeading(label,sort) {
+  const config=jobSortableHeaders[label];
+  if(tab!=='jobs'||!config)return `<th scope="col">${label}</th>`;
+  const active=sort===config.first||sort===config.second;
+  const direction=active?(sort===config.first?config.firstDirection:(config.firstDirection==='ascending'?'descending':'ascending')):'none';
+  const indicator=direction==='descending'?'↓':direction==='ascending'?'↑':'';
+  const instruction=direction==='ascending'?'Clique para ordenar decrescente':'Clique para ordenar crescente';
+  return `<th scope="col" aria-sort="${direction}"><button type="button" class="table-sort-button" data-sort-first="${config.first}" data-sort-second="${config.second}" aria-label="${label}. ${active?instruction:'Clique para ordenar pela ordem padrão'}">${label}<span aria-hidden="true">${indicator}</span></button></th>`;
+}
 function renderTable(rows) {
   const jobTab=['jobs','applications'].includes(tab);
-  const cols = tab === 'runs' ? ['Execução','Data','Estado','Domínios no recorte','E-mails','Vagas','IA',''] : jobTab ? ['Vaga / candidatura','Empresa','Status da candidatura','Score de perfil',...(tab==='jobs'?['Qualidade da descrição','Elegibilidade IA','Recomendação','Minha decisão']:[]),'Pré-match','Prioridade','Apliquei em','Próximo retorno','Execução',''] : tab === 'emails' ? ['E-mail','Empresa','Status','Execução',''] : tab === 'careers' ? ['Página de carreira','Empresa','Status','Execução',''] : ['Empresa','Categoria','Status','E-mails','Vagas','Páginas','Execução',''];
-  $('thead').innerHTML = `<tr>${cols.map(c=>`<th scope="col">${c}</th>`).join('')}</tr>`;
+  const cols = tab === 'runs' ? ['Execução','Data','Estado','Domínios no recorte','E-mails','Vagas','IA',''] : tab === 'jobs' ? ['Vaga / candidatura','Empresa','Acompanhar','Score de perfil','Recomendação','Minha decisão','Status da candidatura','Pré-match','Qualidade da descrição','Elegibilidade IA','Prioridade','Apliquei em','Próximo retorno','Execução'] : jobTab ? ['Vaga / candidatura','Empresa','Status da candidatura','Score de perfil','Pré-match','Prioridade','Apliquei em','Próximo retorno','Execução',''] : tab === 'emails' ? ['E-mail','Empresa','Status','Execução',''] : tab === 'careers' ? ['Página de carreira','Empresa','Status','Execução',''] : ['Empresa','Categoria','Status','E-mails','Vagas','Páginas','Execução',''];
+  $('thead').innerHTML = `<tr>${cols.map(c=>tableHeading(c,filters().sort)).join('')}</tr>`;
   const n = value => `<span class="count ${!value?'zero':''}">${count(value)}</span>`;
   $('tbody').innerHTML = rows.map((r,i) => {
     const run = `<span>${esc(dateLabel(r.date))}</span><span class="subtext" title="${esc(r.run_id)}">${esc(r.run_id)}</span>`;
     const category = `<span class="badge">${esc((r.type || '').startsWith('Unclassified') ? 'Não classificado' : r.type)}</span>`;
     let cells;
     if (tab === 'runs') cells = [`<strong>${esc(r.id)}</strong><span class="subtext">${esc(r.version ? 'Versão '+r.version : 'Versão não informada')}</span>`,dateLabel(r.date,true),runState(r),`${n(r.matching)}<span class="subtext">${r.count} no total da execução</span>`,n(r.matchedEmails),n(r.matchedJobs),`<span class="badge">${aiLabel(r.ai)}</span>`];
-    else if (jobTab) cells = [`<div class="item-link">${link(r.item.url,r.item.title || 'Título não informado')}</div>`,company(r),applicationBadge(r.item),profileScoreCell(r.item,i),...(tab==='jobs'?[descriptionQualityBadge(r.item),aiEligibilityBadge(r.item),decisionBadge(r.item,i),userDecisionBadge(r.item,i)]:[]),preMatchBadge(r.item),`<span class="badge">${esc({low:'Baixa',normal:'Normal',high:'Alta'}[r.item.application?.priority] || 'Normal')}</span>`,esc(r.item.application?.applied_at || '—'),esc(r.item.application?.follow_up_at || '—'),run];
+    else if (jobTab) cells = [`<div class="item-link">${link(r.item.url,r.item.title || 'Título não informado')}</div>`,company(r),...(tab==='jobs'?[`<button class="detail-button" data-detail="${i}">Acompanhar →</button>`,profileScoreCell(r.item,i),decisionBadge(r.item,i),userDecisionBadge(r.item,i),applicationBadge(r.item),preMatchBadge(r.item),descriptionQualityBadge(r.item),aiEligibilityBadge(r.item)]:[applicationBadge(r.item),profileScoreCell(r.item,i),preMatchBadge(r.item)]),`<span class="badge">${esc({low:'Baixa',normal:'Normal',high:'Alta'}[r.item.application?.priority] || 'Normal')}</span>`,esc(r.item.application?.applied_at || '—'),esc(r.item.application?.follow_up_at || '—'),run];
     else if (tab === 'emails') cells = [`<span class="item-link">${esc(r.item)}</span><button class="copy" data-copy="${esc(r.item)}">Copiar</button>`,company(r),statusBadge(r),run];
     else if (tab === 'careers') cells = [`<div class="item-link">${link(r.item)}</div>`,company(r),statusBadge(r),run];
-    else cells = [company(r),category,statusBadge(r),n(r.emails.length),n(r.jobs.length),n(r.pages),run];
-    return `<tr>${cells.map(c=>`<td>${c}</td>`).join('')}<td><button class="detail-button" data-detail="${i}">${jobTab?'Acompanhar':'Detalhes'} →</button></td></tr>`;
+    else cells = [company(r),category,statusBadge(r),tab==='companies'&&filters().coldEmailStatus==='opportunity'
+      ?`${esc(bestContactEmail(r.emails))}<span class="subtext">${count(validCompanyEmails(r.emails).length)} contatos válidos</span>`:n(r.emails.length),n(r.jobs.length),n(r.pages),run];
+    return `<tr>${cells.map(c=>`<td>${c}</td>`).join('')}${tab==='jobs'?'':`<td><button class="detail-button" data-detail="${i}">${jobTab?'Acompanhar':'Detalhes'} →</button></td>`}</tr>`;
   }).join('');
   $('tbody').querySelectorAll('[data-detail]').forEach(b=>b.onclick=()=>tab==='runs' ? showRun(rows[Number(b.dataset.detail)]) : jobTab ? openApplication(rows[Number(b.dataset.detail)]) : showDetail(rows[Number(b.dataset.detail)]));
   $('tbody').querySelectorAll('[data-score-detail]').forEach(b=>b.onclick=()=>showProfileAnalysis(rows[Number(b.dataset.scoreDetail)]));
   $('tbody').querySelectorAll('[data-application-decision]').forEach(b=>b.onclick=()=>showApplicationDecision(rows[Number(b.dataset.applicationDecision)]));
   $('tbody').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>copy(b.dataset.copy));
+  $('thead').querySelectorAll('[data-sort-first]').forEach(button=>button.onclick=()=>{
+    const current=$('sort').value,first=button.dataset.sortFirst,second=button.dataset.sortSecond;
+    $('sort').value=current===first?second:first;
+    page=1;render();
+  });
 }
 function profileScoreCell(job,index) {
   if(!job.profile_analysis)return scoreBadge(job);
@@ -503,8 +546,14 @@ $('export-profile-analysis').onclick=()=>{
 };
 $('detail').addEventListener('click',e=>{if(e.target===$('detail')){const rect=$('detail').getBoundingClientRect();if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)$('detail').close();}});
 async function loadProfile(){
-  try{const response=await fetch('/api/profile',{cache:'no-store'});const value=await response.json();if(!response.ok)throw new Error(value.error||'Falha ao carregar perfil.');profileState=value;renderProfileForm();}
+  try{const response=await fetch('/api/profile',{cache:'no-store'});const value=await response.json();if(!response.ok)throw new Error(value.error||'Falha ao carregar perfil.');profileState=value;setDesiredRoles(value.profile?.desired_roles);renderProfileForm();}
   catch(error){$('profile-meta-info').innerHTML=`<p class="notice">${esc(error.message)}</p>`;}
+}
+function setDesiredRoles(value){desiredRoles=Array.isArray(value)?value.filter(role=>typeof role==='string'&&role.trim()):[];}
+async function loadDesiredRoles(){
+  try{const response=await fetch('/api/profile',{cache:'no-store'});const value=await response.json();if(!response.ok)throw new Error(value.error||'Falha ao carregar perfil.');setDesiredRoles(value.profile?.desired_roles);}
+  catch{setDesiredRoles([]);}
+  if(tab==='jobs'&&filters().desiredRoleStatus)render();
 }
 function profileSelect(name,label,value,options){return `<label class="profile-field">${label}<select name="${name}">${options.map(([v,text])=>`<option value="${v}" ${value===v?'selected':''}>${text}</option>`).join('')}</select></label>`;}
 function profileText(name,label,value='',type='text'){return `<label class="profile-field">${label}<input name="${name}" type="${type}" value="${esc(value)}"></label>`;}
@@ -549,10 +598,10 @@ $('profile-form').addEventListener('submit',async event=>{
   value.work_modes={remote:form.elements.work_remote.value,hybrid:form.elements.work_hybrid.value,onsite:form.elements.work_onsite.value};
   const body=new FormData();body.append('profile',JSON.stringify(value));if(form.elements.resume.files[0])body.append('resume',form.elements.resume.files[0]);
   const button=form.querySelector('button[type=submit]');button.disabled=true;
-  try{const response=await fetch('/api/profile',{method:'POST',headers:{'X-Site-Intel':'dashboard'},body});const result=await response.json();if(!response.ok)throw new Error(result.error||'Não foi possível salvar.');profileState=result;renderProfileForm();toast('Perfil salvo.');}
+  try{const response=await fetch('/api/profile',{method:'POST',headers:{'X-Site-Intel':'dashboard'},body});const result=await response.json();if(!response.ok)throw new Error(result.error||'Não foi possível salvar.');profileState=result;setDesiredRoles(result.profile?.desired_roles);renderProfileForm();toast('Perfil salvo.');}
   catch(error){toast(error.message);}
   finally{button.disabled=false;}
 });
 document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName)&&!$('detail').open&&!$('application-dialog').open){e.preventDefault();$('search').focus();}});
 if(Object.keys(filterLabels).some(k=>!['search','status','type'].includes(k)&&restored[k])){$('advanced').hidden=false;$('advanced-toggle').setAttribute('aria-expanded','true');}
-load();setInterval(()=>{if($('auto').checked&&!document.hidden&&!$('detail').open&&!$('application-dialog').open)load();},30000);
+load();loadDesiredRoles();setInterval(()=>{if($('auto').checked&&!document.hidden&&!$('detail').open&&!$('application-dialog').open)load();},30000);
